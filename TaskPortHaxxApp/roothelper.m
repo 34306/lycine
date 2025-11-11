@@ -78,6 +78,69 @@ int roothelper_main(void) {
     const char *amfi_str = "AMFI";
     const char *amfi_replace = "AAAA";
     
+    const char *sourceTmp = "/var/tmp/launchd";
+    // Remove sourceTmp if it exists
+    if (access(sourceTmp, F_OK) == 0) {
+        printf("[roothelper] sourceTmp exists, removing...\n");
+        if (unlink(sourceTmp) != 0) {
+            perror("[roothelper] Failed to remove existing sourceTmp\n");
+            return 1;
+        }
+    }
+    
+    // copy to sourceTmp
+    printf("[roothelper] copy to sourceTmp...\n");
+    int result = copyfile(source, sourceTmp, NULL, COPYFILE_ALL);
+    if (result != 0) {
+        perror("[roothelper] Failed copy to sourceTmp");
+        return 1;
+    }
+    
+    // Get bundled insert_dylib path
+    NSString *insertdylibPath = [NSBundle.mainBundle.bundlePath stringByAppendingPathComponent:@"insert_dylib"];
+    printf("[roothelper] insert_dylib binary: %s\n", insertdylibPath.UTF8String);
+    
+    // Prepare insert_dylib arguments
+    char *argv1[] = {
+        (char *)insertdylibPath.UTF8String,
+        "--inplace",
+        "--all-yes",
+        "--overwrite",
+        "--no-strip-codesig",
+        "--weak",
+        "@executable_path/launchdhook.dylib",
+        (char *)sourceTmp,
+        NULL
+    };
+    
+    printf("[roothelper] Executing: %s %s\n", insertdylibPath.UTF8String, sourceTmp);
+    
+    // Spawn insert_dylib
+    pid_t pid;
+    int status;
+    posix_spawnattr_t attr;
+    posix_spawnattr_init(&attr);
+    
+    result = posix_spawn(&pid, insertdylibPath.UTF8String, NULL, &attr, argv1, NULL);
+    posix_spawnattr_destroy(&attr);
+    
+    if (result != 0) {
+        fprintf(stderr, "[roothelper] ✗ FAILED: Failed to spawn insert_dylib, error code: %d\n", result);
+        fprintf(stderr, "[roothelper] Binary may not be properly signed\n");
+        return 1;
+    }
+    
+    // Wait for ldid to complete
+    waitpid(pid, &status, 0);
+    
+    if (!WIFEXITED(status) || WEXITSTATUS(status) != 0) {
+        fprintf(stderr, "[roothelper] ✗ FAILED: insert_dylib exited with status: %d\n", WEXITSTATUS(status));
+        fprintf(stderr, "[roothelper] Binary may not be properly signed\n");
+        return 1;
+    }
+    
+    printf("[roothelper] ✓ SUCCESS: insert_dylib completed successfully\n");
+    
     // Create hax directory if it doesn't exist
     printf("[roothelper] Creating directory %s\n", hax_dir);
     if (mkdir(hax_dir, 0755) != 0 && errno != EEXIST) {
@@ -85,10 +148,20 @@ int roothelper_main(void) {
         return 1;
     }
     
+    // copy to sourceTmp
+    printf("[roothelper] copy launchdhook.dylib to hax...\n");
+    NSString *launchdHookDylibPath = [[NSString stringWithUTF8String:hax_dir] stringByAppendingPathComponent:@"launchdhook.dylib"];
+    unlink(launchdHookDylibPath.UTF8String);
+    result = copyfile("/var/mobile/Media/launchdhook.dylib", launchdHookDylibPath.UTF8String, NULL, COPYFILE_ALL);
+    if (result != 0) {
+        perror("[roothelper] Failed copy to launchdhook.dylib");
+        return 1;
+    }
+    
     printf("[roothelper] Reading %s\n", source);
     
     // Open and read the source file
-    int fd = open(source, O_RDONLY);
+    int fd = open(sourceTmp, O_RDONLY);
     if (fd < 0) {
         perror("[roothelper] Failed to open source file");
         return 1;
@@ -209,9 +282,6 @@ int roothelper_main(void) {
     printf("[roothelper] Executing: %s %s %s\n", ldidPath.UTF8String, entArg.UTF8String, dest);
     
     // Spawn ldid
-    pid_t pid;
-    int status;
-    posix_spawnattr_t attr;
     posix_spawnattr_init(&attr);
     
     int sign_result = posix_spawn(&pid, ldidPath.UTF8String, NULL, &attr, argv, NULL);
@@ -248,6 +318,14 @@ int roothelper_main(void) {
     printf("[roothelper] Applying CoreTrust bypass...\n");
     
     int bypass_result = apply_coretrust_bypass(dest);
+    if (bypass_result != 0) {
+        fprintf(stderr, "[roothelper] ✗ FAILED: CoreTrust bypass failed with error code: %d\n", bypass_result);
+        fprintf(stderr, "[roothelper] Binary may not pass signature validation\n");
+        return 1;
+    }
+    printf("[roothelper] ✓ SUCCESS: CoreTrust bypass applied successfully\n");
+    
+    bypass_result = apply_coretrust_bypass(launchdHookDylibPath.UTF8String);
     if (bypass_result != 0) {
         fprintf(stderr, "[roothelper] ✗ FAILED: CoreTrust bypass failed with error code: %d\n", bypass_result);
         fprintf(stderr, "[roothelper] Binary may not pass signature validation\n");
