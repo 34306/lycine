@@ -10,6 +10,8 @@
 #import "AppDelegate.h"
 #import "Header.h"
 #import "unarchive.h"
+#import "jbroot.h"
+#import "bootstrap.h"
 
 int child_execve(char *exceptionPortName, char *path) {
     mach_port_t exception_port = MACH_PORT_NULL;
@@ -150,10 +152,59 @@ int main(int argc, char * argv[]) {
         return child_stage1_prepare();
     } else if (strcmp(argv[1], "roothelper") == 0) {
         return roothelper_main();
+    } else if (strcmp(argv[1], "bootstrap") == 0) {
+        // Bootstrap command
+        if (argc < 3) {
+            printf("Usage: %s bootstrap <install|remove|info>\n", argv[0]);
+            return 1;
+        }
+        
+        if (strcmp(argv[2], "install") == 0) {
+            // Look for bootstrap in argv[3] or use bundled one
+            NSString *bootstrapPath = nil;
+            if (argc >= 4) {
+                bootstrapPath = @(argv[3]);
+            } else {
+                bootstrapPath = [NSBundle.mainBundle.bundlePath stringByAppendingPathComponent:@"bootstrap.tar.zst"];
+            }
+            
+            if (![[NSFileManager defaultManager] fileExistsAtPath:bootstrapPath]) {
+                printf("Bootstrap archive not found: %s\n", bootstrapPath.UTF8String);
+                return 1;
+            }
+            
+            // Create jbroot if needed
+            if (!jbroot_exists()) {
+                if (create_jbroot() != 0) {
+                    printf("Failed to create jbroot\n");
+                    return 1;
+                }
+            }
+            
+            int result = extractBootstrap(bootstrapPath);
+            if (result != 0) {
+                printf("Failed to extract bootstrap\n");
+                return result;
+            }
+            
+            return initializeBootstrap();
+        } else if (strcmp(argv[2], "remove") == 0) {
+            return removeBootstrap();
+        } else if (strcmp(argv[2], "info") == 0) {
+            NSString *jbrootPath = find_jbroot(YES);
+            if (jbrootPath) {
+                printf("JBRoot Path: %s\n", jbrootPath.UTF8String);
+                printf("JBRand: 0x%016llX\n", jbrand());
+                printf("Bootstrap Installed: %s\n", isBootstrapInstalled() ? "Yes" : "No");
+            } else {
+                printf("No jbroot found\n");
+            }
+            return 0;
+        } else {
+            printf("Unknown bootstrap command: %s\n", argv[2]);
+            return 1;
+        }
     }
-    //    if (getuid() != 0) {
-    //        launchTest(nil);
-    //        return 0;
-    //    }
     
+    return 0;
 }

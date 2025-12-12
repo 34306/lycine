@@ -2,7 +2,7 @@
 //  roothelper.m
 //  TaskPortHaxxApp
 //
-//  Root helper that copies and patches launchd
+//  Root helper that copies and patches launchd for roothide jailbreak
 //
 
 @import Foundation;
@@ -14,6 +14,7 @@
 #import <errno.h>
 #import "coretrust_bug.h"
 #import "TSUtil.h"
+#import "jbroot.h"
 
 // Search and replace a string in a buffer
 BOOL patch_binary_string(void *data, size_t size, const char *search_str, const char *replace_str) {
@@ -52,6 +53,52 @@ BOOL patch_binary_string(void *data, size_t size, const char *search_str, const 
     return found;
 }
 
+int setup_roothide_environment(void) {
+    printf("[roothelper] Setting up roothide environment...\n");
+    
+    // Create jbroot directory if it doesn't exist
+    if (!jbroot_exists()) {
+        printf("[roothelper] Creating jbroot directory...\n");
+        if (create_jbroot() != 0) {
+            fprintf(stderr, "[roothelper] Failed to create jbroot directory\n");
+            return 1;
+        }
+    }
+    
+    NSString *jbrootPath = find_jbroot(YES);
+    if (!jbrootPath) {
+        fprintf(stderr, "[roothelper] Failed to find jbroot path\n");
+        return 1;
+    }
+    
+    printf("[roothelper] jbroot path: %s\n", jbrootPath.UTF8String);
+    
+    // Create required directories
+    NSArray *dirs = @[
+        @"basebin",
+        @"Library/LaunchDaemons",
+        @"System/Library/LaunchDaemons",
+        @"Library/LaunchAgents",
+        @"System/Library/LaunchAgents",
+        @"usr/bin",
+        @"usr/lib",
+        @"var/jb"
+    ];
+    
+    NSFileManager *fm = [NSFileManager defaultManager];
+    for (NSString *dir in dirs) {
+        NSString *fullPath = [jbrootPath stringByAppendingPathComponent:dir];
+        NSError *error = nil;
+        [fm createDirectoryAtPath:fullPath withIntermediateDirectories:YES attributes:nil error:&error];
+        if (error && error.code != NSFileWriteFileExistsError) {
+            printf("[roothelper] Created directory: %s\n", fullPath.UTF8String);
+        }
+    }
+    
+    printf("[roothelper] ✓ Roothide environment setup complete\n");
+    return 0;
+}
+
 int roothelper_main(void) {
     printf("[roothelper] Starting as UID: %d, GID: %d\n", getuid(), getgid());
     
@@ -61,11 +108,24 @@ int roothelper_main(void) {
         return 1;
     }
     
+    // Setup roothide environment first
+    if (setup_roothide_environment() != 0) {
+        fprintf(stderr, "[roothelper] Failed to setup roothide environment\n");
+        return 1;
+    }
+    
     // Get boot manifest hash path
     char *preboot_path = return_boot_manifest_hash_main();
     printf("[roothelper] Preboot path: %s\n", preboot_path);
     
-    // Build paths using preboot location
+    // Get jbroot path for storing launchd files
+    NSString *jbrootPath = find_jbroot(NO);
+    if (!jbrootPath) {
+        fprintf(stderr, "[roothelper] ERROR: jbroot not found!\n");
+        return 1;
+    }
+    
+    // Build paths using preboot location (for launchd binary)
     char hax_dir[256];
     char dest[256];
     snprintf(hax_dir, sizeof(hax_dir), "%s/hax", preboot_path);
@@ -148,14 +208,48 @@ int roothelper_main(void) {
         return 1;
     }
     
-    // copy to sourceTmp
+    // Copy launchdhook.dylib to hax directory
     printf("[roothelper] copy launchdhook.dylib to hax...\n");
     NSString *launchdHookDylibPath = [[NSString stringWithUTF8String:hax_dir] stringByAppendingPathComponent:@"launchdhook.dylib"];
     unlink(launchdHookDylibPath.UTF8String);
-    result = copyfile("/var/mobile/Media/launchdhook.dylib", launchdHookDylibPath.UTF8String, NULL, COPYFILE_ALL);
+    
+    // Try to copy from app bundle first, then from Media folder
+    NSString *bundledHookPath = [NSBundle.mainBundle.bundlePath stringByAppendingPathComponent:@"launchdhook.dylib"];
+    const char *hookSource = "/var/mobile/Media/launchdhook.dylib";
+    if (access(bundledHookPath.UTF8String, F_OK) == 0) {
+        hookSource = bundledHookPath.UTF8String;
+    }
+    
+    result = copyfile(hookSource, launchdHookDylibPath.UTF8String, NULL, COPYFILE_ALL);
     if (result != 0) {
         perror("[roothelper] Failed copy to launchdhook.dylib");
         return 1;
+    }
+    
+    // Also copy launchdhook.dylib to jbroot/basebin
+    NSString *basebinHookPath = jbroot(@"basebin/launchdhook.dylib");
+    if (basebinHookPath) {
+        unlink(basebinHookPath.UTF8String);
+        copyfile(hookSource, basebinHookPath.UTF8String, NULL, COPYFILE_ALL);
+        printf("[roothelper] Copied launchdhook.dylib to %s\n", basebinHookPath.UTF8String);
+    }
+    
+    // Copy xpcproxyhook.dylib if available
+    NSString *bundledXpcHookPath = [NSBundle.mainBundle.bundlePath stringByAppendingPathComponent:@"xpcproxyhook.dylib"];
+    if (access(bundledXpcHookPath.UTF8String, F_OK) == 0) {
+        // Copy to hax directory
+        NSString *xpcHookDylibPath = [[NSString stringWithUTF8String:hax_dir] stringByAppendingPathComponent:@"xpcproxyhook.dylib"];
+        unlink(xpcHookDylibPath.UTF8String);
+        copyfile(bundledXpcHookPath.UTF8String, xpcHookDylibPath.UTF8String, NULL, COPYFILE_ALL);
+        printf("[roothelper] Copied xpcproxyhook.dylib to %s\n", xpcHookDylibPath.UTF8String);
+        
+        // Also copy to jbroot/basebin
+        NSString *basebinXpcHookPath = jbroot(@"basebin/xpcproxyhook.dylib");
+        if (basebinXpcHookPath) {
+            unlink(basebinXpcHookPath.UTF8String);
+            copyfile(bundledXpcHookPath.UTF8String, basebinXpcHookPath.UTF8String, NULL, COPYFILE_ALL);
+            printf("[roothelper] Copied xpcproxyhook.dylib to %s\n", basebinXpcHookPath.UTF8String);
+        }
     }
     
     printf("[roothelper] Reading %s\n", source);
@@ -374,6 +468,18 @@ int roothelper_main(void) {
     }
     printf("[roothelper]   - ✓ Signed with ldid + entitlements\n");
     printf("[roothelper]   - ✓ CoreTrust bypass applied\n");
+    
+    // Print roothide information
+    NSString *jbrootFinal = find_jbroot(NO);
+    if (jbrootFinal) {
+        printf("\n[roothelper] ========================================\n");
+        printf("[roothelper] Roothide Environment Info:\n");
+        printf("[roothelper] ========================================\n");
+        printf("[roothelper] jbroot path: %s\n", jbrootFinal.UTF8String);
+        printf("[roothelper] jbrand: 0x%016llX\n", jbrand());
+        printf("[roothelper] basebin: %s/basebin\n", jbrootFinal.UTF8String);
+        printf("[roothelper] ========================================\n");
+    }
     
     return 0;
 }

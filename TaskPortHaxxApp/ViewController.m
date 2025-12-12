@@ -14,6 +14,8 @@
 #import "ViewController.h"
 #import "Header.h"
 #import "TSUtil.h"
+#import "jbroot.h"
+#import "bootstrap.h"
 
 NSDictionary *getLaunchdStringOffsets(void) {
     NSMutableDictionary *dict = [NSMutableDictionary dictionary];
@@ -101,20 +103,28 @@ uint64_t getDyldPACIAOffset(uint64_t _dyld_start) {
 
 - (void)viewDidLoad {
     [super viewDidLoad];
-    self.navigationItem.title = @"Task Port Haxx";
+    self.navigationItem.title = @"Lycine - Roothide JB";
     self.navigationItem.leftBarButtonItem = [[UIBarButtonItem alloc] initWithTitle:@"Options" menu:[UIMenu menuWithTitle:@"Options" children:@[
         [UIAction actionWithTitle:@"Change Signed Pointer" image:nil identifier:nil handler:^(__kindof UIAction * _Nonnull action) {
             [self changePtrTapped];
         }],
         [UIAction actionWithTitle:@"Userspace reboot" image:nil identifier:nil handler:^(__kindof UIAction * _Nonnull action) {
             [self userspaceRebootTapped];
+        }],
+        [UIAction actionWithTitle:@"Bootstrap" image:nil identifier:nil handler:^(__kindof UIAction * _Nonnull action) {
+            [self bootstrapButtonTapped];
+        }],
+        [UIAction actionWithTitle:@"Remove Bootstrap" image:nil identifier:nil handler:^(__kindof UIAction * _Nonnull action) {
+            [self removeBootstrapTapped];
+        }],
+        [UIAction actionWithTitle:@"Show JBRoot Info" image:nil identifier:nil handler:^(__kindof UIAction * _Nonnull action) {
+            [self showJBRootInfo];
         }]
     ]]];
     self.navigationItem.rightBarButtonItems = @[
-        [[UIBarButtonItem alloc] initWithTitle:@"Test" style:UIBarButtonItemStylePlain target:self action:@selector(testButtonTapped)],
-        [[UIBarButtonItem alloc] initWithTitle:@"Arb Call" style:UIBarButtonItemStylePlain target:self action:@selector(arbCallButtonTapped)],
+        [[UIBarButtonItem alloc] initWithTitle:@"Jailbreak" style:UIBarButtonItemStylePlain target:self action:@selector(arbCallButtonTapped)],
         [[UIBarButtonItem alloc] initWithTitle:@"RootHelper" style:UIBarButtonItemStylePlain target:self action:@selector(rootHelperButtonTapped)],
-        [[UIBarButtonItem alloc] initWithTitle:@"Detach" style:UIBarButtonItemStylePlain target:self action:@selector(detachButtonTapped)]
+        [[UIBarButtonItem alloc] initWithTitle:@"Test" style:UIBarButtonItemStylePlain target:self action:@selector(testButtonTapped)]
     ];
     
     UITextView *textView = [[UITextView alloc] initWithFrame:self.view.bounds];
@@ -719,11 +729,148 @@ uint64_t getDyldPACIAOffset(uint64_t _dyld_start) {
     });
 }
 
-- (void)alertWithTitle:(NSString *)title message:(NSString *)message {
-    UIAlertController *alert = [UIAlertController alertControllerWithTitle:title message:message preferredStyle:UIAlertControllerStyleAlert];
-    UIAlertAction *okAction = [UIAlertAction actionWithTitle:@"OK" style:UIAlertActionStyleDefault handler:nil];
-    [alert addAction:okAction];
+- (void)bootstrapButtonTapped {
+    dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
+        printf("\n=== Starting Bootstrap Installation ===\n");
+        
+        // Check if already installed
+        if (isBootstrapInstalled()) {
+            printf("Bootstrap is already installed at %s\n", find_jbroot(NO).UTF8String);
+            dispatch_async(dispatch_get_main_queue(), ^{
+                [self alertWithTitle:@"Bootstrap" message:@"Bootstrap is already installed!"];
+            });
+            return;
+        }
+        
+        // First run roothelper to setup environment
+        printf("Setting up roothide environment...\n");
+        NSString *execPath = NSBundle.mainBundle.executablePath;
+        NSString *stdOut = nil;
+        NSString *stdErr = nil;
+        int exit_code = spawnRoot(execPath, @[@"roothelper"], &stdOut, &stdErr);
+        
+        if (stdOut && stdOut.length > 0) {
+            printf("%s", stdOut.UTF8String);
+        }
+        if (stdErr && stdErr.length > 0) {
+            fprintf(stderr, "%s", stdErr.UTF8String);
+        }
+        
+        if (exit_code != 0) {
+            printf("✗ Failed to setup environment\n");
+            dispatch_async(dispatch_get_main_queue(), ^{
+                [self alertWithTitle:@"Error" message:@"Failed to setup roothide environment"];
+            });
+            return;
+        }
+        
+        // Look for bootstrap tar in app bundle
+        NSString *bundlePath = NSBundle.mainBundle.bundlePath;
+        NSArray *possibleBootstraps = @[
+            @"bootstrap.tar.zst",
+            @"bootstrap.tar.gz", 
+            @"bootstrap.tar"
+        ];
+        
+        NSString *bootstrapPath = nil;
+        for (NSString *name in possibleBootstraps) {
+            NSString *path = [bundlePath stringByAppendingPathComponent:name];
+            if ([[NSFileManager defaultManager] fileExistsAtPath:path]) {
+                bootstrapPath = path;
+                break;
+            }
+        }
+        
+        if (bootstrapPath) {
+            printf("Found bootstrap at: %s\n", bootstrapPath.UTF8String);
+            
+            int result = extractBootstrap(bootstrapPath);
+            if (result != 0) {
+                printf("✗ Failed to extract bootstrap\n");
+                dispatch_async(dispatch_get_main_queue(), ^{
+                    [self alertWithTitle:@"Error" message:@"Failed to extract bootstrap"];
+                });
+                return;
+            }
+            
+            // Initialize bootstrap
+            result = initializeBootstrap();
+            if (result != 0) {
+                printf("✗ Failed to initialize bootstrap\n");
+            }
+        } else {
+            printf("No bootstrap archive found in app bundle\n");
+            printf("Creating empty roothide environment...\n");
+            initializeBootstrap();
+        }
+        
+        printf("=== Bootstrap Installation Complete ===\n\n");
+        
+        dispatch_async(dispatch_get_main_queue(), ^{
+            NSString *jbrootPath = find_jbroot(NO);
+            NSString *msg = jbrootPath ? 
+                [NSString stringWithFormat:@"Bootstrap installed at:\n%@", jbrootPath] :
+                @"Roothide environment created";
+            [self alertWithTitle:@"Success" message:msg];
+        });
+    });
+}
+
+- (void)removeBootstrapTapped {
+    UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"Remove Bootstrap" 
+                                                                   message:@"This will remove the entire jbroot directory. Are you sure?"
+                                                            preferredStyle:UIAlertControllerStyleAlert];
+    
+    UIAlertAction *removeAction = [UIAlertAction actionWithTitle:@"Remove" style:UIAlertActionStyleDestructive handler:^(UIAlertAction *action) {
+        dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
+            printf("Removing bootstrap...\n");
+            int result = removeBootstrap();
+            dispatch_async(dispatch_get_main_queue(), ^{
+                if (result == 0) {
+                    [self alertWithTitle:@"Success" message:@"Bootstrap removed successfully"];
+                } else {
+                    [self alertWithTitle:@"Error" message:@"Failed to remove bootstrap"];
+                }
+            });
+        });
+    }];
+    
+    UIAlertAction *cancelAction = [UIAlertAction actionWithTitle:@"Cancel" style:UIAlertActionStyleCancel handler:nil];
+    [alert addAction:removeAction];
+    [alert addAction:cancelAction];
     [self presentViewController:alert animated:YES completion:nil];
+}
+
+- (void)showJBRootInfo {
+    NSString *jbrootPath = find_jbroot(YES);
+    NSString *message;
+    
+    if (jbrootPath) {
+        uint64_t rand = jbrand();
+        BOOL installed = isBootstrapInstalled();
+        message = [NSString stringWithFormat:
+                   @"JBRoot Path:\n%@\n\n"
+                   @"JBRand: 0x%016llX\n\n"
+                   @"Bootstrap Installed: %@",
+                   jbrootPath, rand, installed ? @"Yes" : @"No"];
+    } else {
+        message = @"No jbroot found.\n\nRun RootHelper first to create the roothide environment.";
+    }
+    
+    printf("\n=== JBRoot Info ===\n");
+    printf("%s\n", message.UTF8String);
+    printf("===================\n\n");
+    
+    [self alertWithTitle:@"Roothide Info" message:message];
+}
+
+- (void)alertWithTitle:(NSString *)title message:(NSString *)message {
+    dispatch_async(dispatch_get_main_queue(), ^{
+        UIAlertController *alert = [UIAlertController alertControllerWithTitle:title message:message preferredStyle:UIAlertControllerStyleAlert];
+        UIAlertAction *okAction = [UIAlertAction actionWithTitle:@"OK" style:UIAlertActionStyleDefault handler:nil];
+        [alert addAction:okAction];
+        [self presentViewController:alert animated:YES completion:nil];
+    });
 }
 
 @end

@@ -60,6 +60,71 @@ function logosCompile {
     done
 }
 
+function buildHooks {
+    echo "Building launchdhook.dylib..."
+    pushd ${PROJECT_DIR}/launchdhook > /dev/null
+    make clean 2>/dev/null || true
+    make
+    if [ $? -ne 0 ]; then
+        echo "Failed to build launchdhook.dylib"
+        popd > /dev/null
+        return -1
+    fi
+    ldid -S launchdhook.dylib 2>/dev/null || true
+    popd > /dev/null
+    
+    echo "Building xpcproxyhook.dylib..."
+    pushd ${PROJECT_DIR}/xpcproxyhook > /dev/null
+    make clean 2>/dev/null || true
+    make
+    if [ $? -ne 0 ]; then
+        echo "Failed to build xpcproxyhook.dylib"
+        popd > /dev/null
+        return -1
+    fi
+    ldid -S xpcproxyhook.dylib 2>/dev/null || true
+    popd > /dev/null
+    
+    echo "Hooks built successfully!"
+}
+
+function copyResources {
+    echo "Copying resources to app bundle..."
+    
+    # Copy ldid
+    if [ -f ${PROJECT_DIR}/Resources/ldid ]; then
+        cp ${PROJECT_DIR}/Resources/ldid ${TARGET_PATH}/ldid
+        chmod +x ${TARGET_PATH}/ldid
+    fi
+    
+    # Copy insert_dylib
+    if [ -f ${PROJECT_DIR}/Resources/insert_dylib ]; then
+        cp ${PROJECT_DIR}/Resources/insert_dylib ${TARGET_PATH}/insert_dylib
+        chmod +x ${TARGET_PATH}/insert_dylib
+    fi
+    
+    # Copy launchd_ent.plist
+    if [ -f ${PROJECT_DIR}/Resources/launchd_ent.plist ]; then
+        cp ${PROJECT_DIR}/Resources/launchd_ent.plist ${TARGET_PATH}/launchd_ent.plist
+    fi
+    
+    # Copy bootstrap
+    if [ -f ${PROJECT_DIR}/Resources/bootstrap.tar.zst ]; then
+        cp ${PROJECT_DIR}/Resources/bootstrap.tar.zst ${TARGET_PATH}/bootstrap.tar.zst
+    fi
+    
+    # Copy hooks
+    if [ -f ${PROJECT_DIR}/launchdhook/launchdhook.dylib ]; then
+        cp ${PROJECT_DIR}/launchdhook/launchdhook.dylib ${TARGET_PATH}/launchdhook.dylib
+    fi
+    
+    if [ -f ${PROJECT_DIR}/xpcproxyhook/xpcproxyhook.dylib ]; then
+        cp ${PROJECT_DIR}/xpcproxyhook/xpcproxyhook.dylib ${TARGET_PATH}/xpcproxyhook.dylib
+    fi
+    
+    echo "Resources copied successfully!"
+}
+
 function doSign {
     ENT_PATH=${TARGET_SRC_PATH}/${TARGET_NAME}.ent
     if [ ! -z ${CODE_SIGN_ENTITLEMENTS} ]; then
@@ -161,7 +226,15 @@ if [ x$UTIL = "xlogos" ]; then
     logosCompile || exit -1
     exit 0
 fi
+
+# Build hooks first
+buildHooks || exit -1
+
 doSign || exit -1
+
+# Copy resources after signing
+copyResources || exit -1
+
 if [ ${JBDEV_TYPE} = "jailbreak" ] && [ x${JBDEV_NO_COPY} != "xYES" ] ; then
     copyToLayout || exit -1
 fi
